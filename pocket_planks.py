@@ -6,6 +6,8 @@ A relaxed puzzle-platformer. Place blocks, then play the level.
 import pygame
 import sys
 
+import art
+
 # ─────────────────────────────────────────────
 #  CONSTANTS
 # ─────────────────────────────────────────────
@@ -16,9 +18,19 @@ TITLE = "Pocket Planks"
 # Physics
 GRAVITY       = 1.1     # snappier fall
 JUMP_SPEED    = 18      # higher, faster jump
-SPRING_SPEED  = 34      # spring still ~2x jump
+SPRING_SPEED  = 25      # ~2x jump height (height scales with speed squared)
 PLAYER_SPEED  = 7       # faster horizontal movement
 MAX_FALL      = 22      # terminal velocity downward
+
+# Fixed timestep — physics always runs at FPS steps per second
+STEP_MS             = 1000 / FPS
+LOOP_HZ             = FPS * 2   # checking twice per step keeps steps evenly spaced
+MAX_STEPS_PER_FRAME = 5         # a longer hitch is skipped, not fast-forwarded
+
+# Jump assists
+COYOTE_FRAMES      = 6   # frames after walking off an edge that a jump still works
+JUMP_BUFFER_FRAMES = 6   # frames before landing that a W press still counts
+JUMP_CUT_SPEED     = 6   # upward speed a jump drops to when W is released
 
 # Player dimensions
 PLAYER_W = 32
@@ -33,40 +45,11 @@ SPRING_W, SPRING_H = 44,  22
 FREEZE_FRAMES = 48
 
 # ─────────────────────────────────────────────
-#  COLOURS
-# ─────────────────────────────────────────────
-C_BG          = (30,  32,  40)
-C_PLAYER      = (100, 200, 255)
-C_PLAYER_FROZEN = (220, 100, 100)   # tint when spike-frozen
-C_PLAYER_EYE  = (20,  20,  30)
-C_START       = (60,  160,  60)
-C_WIN         = (255, 210,  50)
-C_WIN_BORDER  = (220, 160,  10)
-C_STATIC      = (90,  90, 110)
-C_SPIKE       = (200,  55,  55)
-C_SPIKE_DARK  = (140,  30,  30)
-C_PLANK       = (160, 110,  60)
-C_PLANK_EDGE  = (110,  70,  30)
-C_BOX         = (130, 130, 140)
-C_BOX_EDGE    = ( 80,  80,  90)
-C_SPRING      = ( 60, 190, 170)
-C_SPRING_EDGE = ( 30, 130, 120)
-C_HUD_BG      = (20,  22,  30, 180)
-C_HUD_TEXT    = (230, 230, 230)
-C_PHASE_BUILD = (80,  200, 120)
-C_PHASE_PLAY  = (255, 160,  60)
-C_GHOST       = (255, 255, 255, 60)
-C_GHOST_BLOCK = (200, 200, 200, 80)
-
-
-# ─────────────────────────────────────────────
 #  BLOCK CLASSES
 # ─────────────────────────────────────────────
 class Block:
     """Base class for all place-able blocks."""
     kind   = "block"
-    color  = C_BOX
-    ecolor = C_BOX_EDGE
     w      = BOX_W
     h      = BOX_H
 
@@ -79,15 +62,8 @@ class Block:
         return pygame.Rect(self.x, self.y, self.w, self.h)
 
     def draw(self, surf, ghost=False):
-        r = self.rect
-        if ghost:
-            s = pygame.Surface((r.w, r.h), pygame.SRCALPHA)
-            s.fill((*self.color[:3], 100))
-            surf.blit(s, (r.x, r.y))
-            pygame.draw.rect(surf, (*self.ecolor[:3], 160), r, 2)
-        else:
-            pygame.draw.rect(surf, self.color, r)
-            pygame.draw.rect(surf, self.ecolor, r, 2)
+        sprite = art.ghost if ghost else art.block
+        surf.blit(sprite(self.kind, self.w, self.h), self.rect)
 
     def snap_center(self, cx, cy):
         """Move block so its center is at (cx, cy)."""
@@ -109,48 +85,20 @@ class Block:
 
 class Plank(Block):
     kind   = "plank"
-    color  = C_PLANK
-    ecolor = C_PLANK_EDGE
     w      = PLANK_W
     h      = PLANK_H
 
 
 class Box(Block):
     kind   = "box"
-    color  = C_BOX
-    ecolor = C_BOX_EDGE
     w      = BOX_W
     h      = BOX_H
 
 
 class Spring(Block):
     kind   = "spring"
-    color  = C_SPRING
-    ecolor = C_SPRING_EDGE
     w      = SPRING_W
     h      = SPRING_H
-
-    def draw(self, surf, ghost=False):
-        r = self.rect
-        alpha = 100 if ghost else 255
-        # Body
-        body = pygame.Rect(r.x, r.y + r.h // 2, r.w, r.h // 2)
-        top  = pygame.Rect(r.x + 4, r.y, r.w - 8, r.h // 2)
-        if ghost:
-            for sub in (body, top):
-                s = pygame.Surface((sub.w, sub.h), pygame.SRCALPHA)
-                s.fill((*self.color[:3], 80))
-                surf.blit(s, (sub.x, sub.y))
-        else:
-            pygame.draw.rect(surf, self.color, body)
-            pygame.draw.rect(surf, self.ecolor, body, 2)
-            pygame.draw.rect(surf, self.color, top)
-            pygame.draw.rect(surf, self.ecolor, top, 2)
-            # little coil lines
-            for i in range(3):
-                yy = r.y + 4 + i * 4
-                pygame.draw.line(surf, self.ecolor,
-                                 (r.x + 6, yy), (r.x + r.w - 6, yy), 1)
 
 
 BLOCK_CLASSES = {"plank": Plank, "box": Box, "spring": Spring}
@@ -171,12 +119,13 @@ LEVELS = [
     # ── Level 1: tutorial — 1 plank, 1 spring ──────────────────────────────
     {
         "name": "Level 1 — Tutorial",
+        # The ledge is too high and far for either block alone: jump onto the
+        # plank, then onto the spring.
         "terrain": [
-            _rect(500, 530,  180,  20),   # mid platform
-            _rect(950, 380,  180,  20),   # upper platform
+            _rect(800, 320,  240,  20),   # upper ledge
         ],
         "start_platform": _rect( 60, 580, 180, 20),
-        "win_zone":        _rect(960, 305, 160, 55),
+        "win_zone":        _rect(810, 245, 220, 55),
         "spikes":          [],
         "blocks_in_hand":  {"plank": 1, "spring": 1},
     },
@@ -221,9 +170,13 @@ class Player:
         self.y  = float(y)   # top
         self.vx = 0.0
         self.vy = 0.0
+        self.facing = 1   # 1 = right, -1 = left
         self.on_ground = False
         self.freeze_timer = 0   # frames left frozen (spike hit)
-        self.spring_launched = False
+        self.spike_falling = False   # dropping through everything after a freeze
+        self.coyote_timer = 0   # frames left to jump after walking off an edge
+        self.jump_buffer = 0    # frames left for a W press to count on landing
+        self.jump_cuttable = False   # releasing W can shorten this rise (not springs)
 
     @property
     def rect(self):
@@ -240,8 +193,10 @@ class Player:
         self.vx = 0.0
         self.vy = 0.0
         self.on_ground = False
-        self.spring_launched = False
         self.freeze_timer = 0
+        self.spike_falling = False
+        self.coyote_timer = 0
+        self.jump_buffer = 0
 
     def hit_spike(self):
         """Called when the player touches a spike."""
@@ -249,19 +204,42 @@ class Player:
             self.freeze_timer = FREEZE_FRAMES
             self.vx = 0.0
             self.vy = 0.0
-
-    def jump(self):
-        if self.on_ground and self.freeze_timer == 0:
-            self.vy = -JUMP_SPEED
             self.on_ground = False
+            self.coyote_timer = 0
+            self.jump_buffer = 0
+
+    def press_jump(self):
+        """W pressed: jump now if possible, otherwise remember it for landing."""
+        if self.freeze_timer > 0 or self.spike_falling:
+            return
+        self.jump_buffer = JUMP_BUFFER_FRAMES + 1   # +1: the current step uses one up
+        self._try_jump()
+
+    def release_jump(self):
+        """W released: cut a rising jump short."""
+        if self.jump_cuttable and self.vy < -JUMP_CUT_SPEED:
+            self.vy = -JUMP_CUT_SPEED
+
+    def _try_jump(self):
+        """Jump if standing or within coyote time. True if the jump happened."""
+        if not (self.on_ground or self.coyote_timer > 0):
+            return False
+        self.vy = -JUMP_SPEED
+        self.on_ground = False
+        self.coyote_timer = 0
+        self.jump_buffer = 0
+        self.jump_cuttable = True
+        return True
 
     def apply_input(self, keys):
-        if self.freeze_timer > 0:
+        if self.freeze_timer > 0 or self.spike_falling:
             return
         if keys[pygame.K_a]:
             self.vx = -PLAYER_SPEED
+            self.facing = -1
         elif keys[pygame.K_d]:
             self.vx = PLAYER_SPEED
+            self.facing = 1
         else:
             self.vx = 0.0
 
@@ -269,7 +247,8 @@ class Player:
         """Physics step.
         all_rects  — list of pygame.Rect or (rect, "spring") tuples
         spike_rects — list of pygame.Rect for spike collision
-        Returns a string token or None: 'respawn', 'spring', 'spike'
+        Returns a string token or None: 'respawn', 'spring', 'spike', or
+        'jump' for a buffered jump, which lands and takes off in the same step
         """
         result = None
         if spike_rects is None:
@@ -278,9 +257,15 @@ class Player:
         if self.freeze_timer > 0:
             self.freeze_timer -= 1
             if self.freeze_timer == 0:
-                # launch straight down off screen
-                self.vy = MAX_FALL
-                self.vx = 0.0
+                # drop straight down off screen, through floors and blocks
+                self.spike_falling = True
+            return result
+
+        if self.spike_falling:
+            self.y += MAX_FALL
+            if self.y > SCREEN_H + 20:
+                self.respawn(start_platform)
+                result = "respawn"
             return result
 
         # Gravity
@@ -330,6 +315,9 @@ class Player:
         if landed_spring:
             self.vy = -SPRING_SPEED
             self.on_ground = False
+            self.coyote_timer = 0
+            self.jump_buffer = 0
+            self.jump_cuttable = False
             result = "spring"
 
         # ── Spike collision ──
@@ -342,23 +330,29 @@ class Player:
                     result = "spike"
                     break
 
+        # ── Buffered jump, on the landing frame ──
+        if self.on_ground and self.jump_buffer > 0 and self._try_jump():
+            result = "jump"
+
         # ── Off bottom ──
         if self.y > SCREEN_H + 20:
             self.respawn(start_platform)
             result = "respawn"
 
+        # ── Jump timers ──
+        if self.on_ground:
+            self.coyote_timer = COYOTE_FRAMES + 1   # +1: the step leaving the edge uses one up
+        elif self.coyote_timer > 0:
+            self.coyote_timer -= 1
+        if self.jump_buffer > 0:
+            self.jump_buffer -= 1
+
         return result
 
     def draw(self, surf):
-        r = self.rect
-        body_col = C_PLAYER_FROZEN if self.freeze_timer > 0 else C_PLAYER
-        pygame.draw.rect(surf, body_col, r, border_radius=4)
-        # eyes
-        eye_y = r.y + 10
-        pygame.draw.circle(surf, C_PLAYER_EYE, (r.x + 9,  eye_y), 4)
-        pygame.draw.circle(surf, C_PLAYER_EYE, (r.x + 23, eye_y), 4)
-        pygame.draw.circle(surf, (255,255,255), (r.x + 10, eye_y), 2)
-        pygame.draw.circle(surf, (255,255,255), (r.x + 24, eye_y), 2)
+        hurt = self.freeze_timer > 0 or self.spike_falling
+        sprite = art.player(PLAYER_W, PLAYER_H, self.facing, hurt)
+        surf.blit(sprite, self.rect.move(-art.PLAYER_PAD, -art.PLAYER_PAD))
 
 
 # ─────────────────────────────────────────────
@@ -404,7 +398,8 @@ class Game:
 
     def _forbidden_rects(self, exclude=None):
         """All rects where blocks must NOT be placed."""
-        rects = list(self.terrain) + [self.start_plat, self.win_zone]
+        rects = list(self.terrain) + list(self.spikes)
+        rects += [self.start_plat, self.win_zone, self.player.rect]
         for b in self.placed:
             if b is not exclude:
                 rects.append(b.rect)
@@ -431,6 +426,21 @@ class Game:
                 rects.append(b.rect)
         return rects
 
+    def _inventory_slots(self):
+        """(kind, rect) for each block slot in the HUD."""
+        panel_x, panel_y = SCREEN_W - 220, 16
+        box_size, gap = 48, 12
+        return [(kind, pygame.Rect(panel_x + i * (box_size + gap), panel_y,
+                                   box_size, box_size))
+                for i, kind in enumerate(self.hand)]
+
+    def _select_available(self):
+        """Move the selection to a block still in hand, if the current one ran out."""
+        if self.hand.get(self.selected_kind, 0) == 0:
+            available = [k for k, v in self.hand.items() if v > 0]
+            if available:
+                self.selected_kind = available[0]
+
     def _on_start_platform(self):
         """True if player is standing on the start platform."""
         pr = self.player.rect
@@ -441,17 +451,25 @@ class Game:
 
     # ── Main loop ─────────────────────────────────────────────────────────
     def run(self):
+        accumulator = 0.0
         while True:
-            dt = self.clock.tick(FPS)
+            accumulator += min(self.clock.tick(LOOP_HZ),
+                               MAX_STEPS_PER_FRAME * STEP_MS)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
                 self._handle_event(event)
 
-            self._update()
-            self._draw()
-            pygame.display.flip()
+            stepped = False
+            while accumulator >= STEP_MS:
+                self._update()
+                accumulator -= STEP_MS
+                stepped = True
+
+            if stepped:
+                self._draw()
+                pygame.display.flip()
 
     # ── Event handling ────────────────────────────────────────────────────
     def _handle_event(self, event):
@@ -462,35 +480,33 @@ class Game:
             self._build_event(event)
         elif self.phase == "play":
             self._play_event(event)
-        elif self.phase == "win":
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-                next_idx = self.level_idx + 1
-                if next_idx < len(LEVELS):
-                    self._load_level(next_idx)
-                # else: stay on win screen (beat the game)
 
     def _build_event(self, event):
         if event.type == pygame.KEYDOWN:
             # Number keys to select block type
-            if event.key == pygame.K_1 and "plank" in self.hand:
+            if event.key == pygame.K_1 and self.hand.get("plank", 0) > 0:
                 self.selected_kind = "plank"
-            elif event.key == pygame.K_2 and "box" in self.hand:
+            elif event.key == pygame.K_2 and self.hand.get("box", 0) > 0:
                 self.selected_kind = "box"
-            elif event.key == pygame.K_3 and "spring" in self.hand:
+            elif event.key == pygame.K_3 and self.hand.get("spring", 0) > 0:
                 self.selected_kind = "spring"
 
             if event.key == pygame.K_SPACE:
                 self.phase = "play"
-                self.dragging = None
-                # ensure selected_kind is still valid (counts may have changed)
-                if self.hand.get(self.selected_kind, 0) == 0:
-                    available = [k for k, v in self.hand.items() if v > 0]
-                    if available:
-                        self.selected_kind = available[0]
+                # a block still being dragged goes back to the hand
+                if self.dragging is not None:
+                    self.hand[self.dragging.kind] += 1
+                    self.dragging = None
+                self._select_available()
                 return
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
+            # Clicking an inventory slot chooses that block
+            for kind, slot in self._inventory_slots():
+                if slot.collidepoint(mx, my):
+                    self.selected_kind = kind
+                    return
             # Clicking a placed block picks it up for re-positioning
             for b in reversed(self.placed):
                 if b.rect.collidepoint(mx, my):
@@ -516,6 +532,7 @@ class Game:
                 else:
                     self.hand[b.kind] = self.hand.get(b.kind, 0) + 1
                 self.dragging = None
+                self._select_available()
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             # Right-click a placed block → return it to hand
@@ -528,11 +545,12 @@ class Game:
 
     def _play_event(self, event):
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_w or event.key == pygame.K_SPACE:
-                if self._on_start_platform():
-                    self.phase = "build"
-                else:
-                    self.player.jump()
+            if event.key == pygame.K_w:
+                self.player.press_jump()
+            elif event.key == pygame.K_SPACE and self._on_start_platform():
+                self.phase = "build"
+        elif event.type == pygame.KEYUP and event.key == pygame.K_w:
+            self.player.release_jump()
 
     # ── Update ────────────────────────────────────────────────────────────
     def _update(self):
@@ -547,8 +565,9 @@ class Game:
         result = self.player.update(collision_list, self.start_plat,
                                     spike_rects=self.spikes)
 
-        # Win check — only when player is alive (not mid-respawn)
-        if self.player.y < SCREEN_H and self.win_zone.colliderect(self.player.rect):
+        # Win check — the player has to land, not just pass through the zone
+        landed = self.player.on_ground or result == "jump"
+        if landed and self.win_zone.colliderect(self.player.rect):
             next_idx = self.level_idx + 1
             if next_idx < len(LEVELS):
                 self._load_level(next_idx)
@@ -557,37 +576,26 @@ class Game:
 
     # ── Drawing ───────────────────────────────────────────────────────────
     def _draw(self):
-        self.screen.fill(C_BG)
+        self.screen.blit(art.background(SCREEN_W, SCREEN_H), (0, 0))
 
         # Static terrain
         for r in self.terrain:
-            pygame.draw.rect(self.screen, C_STATIC, r)
-            pygame.draw.rect(self.screen, (50, 50, 65), r, 2)
+            self.screen.blit(art.ground(r.w, r.h), r)
 
-        # Start platform
-        pygame.draw.rect(self.screen, C_START, self.start_plat)
-        pygame.draw.rect(self.screen, (30, 110, 30), self.start_plat, 2)
+        # Start platform, marked with a flag
+        self.screen.blit(art.ground(self.start_plat.w, self.start_plat.h),
+                         self.start_plat)
+        pole = art.flag()
+        self.screen.blit(pole, (self.start_plat.x + 8,
+                                self.start_plat.top - pole.get_height()))
 
         # Win zone
-        pygame.draw.rect(self.screen, C_WIN, self.win_zone)
-        pygame.draw.rect(self.screen, C_WIN_BORDER, self.win_zone, 3)
-        lbl = self.font_xs.render("WIN", True, (80, 50, 0))
-        self.screen.blit(lbl, lbl.get_rect(center=self.win_zone.center))
+        self.screen.blit(art.win_zone(self.win_zone.w, self.win_zone.h),
+                         self.win_zone)
 
-        # Spikes — draw a row of triangles for each spike rect
+        # Spikes
         for sr in self.spikes:
-            spike_w = 16   # width of each individual spike triangle
-            count   = max(1, sr.w // spike_w)
-            for i in range(count):
-                bx = sr.x + i * spike_w
-                tip_x = bx + spike_w // 2
-                pts = [
-                    (bx,           sr.bottom),
-                    (tip_x,        sr.top),
-                    (bx + spike_w, sr.bottom),
-                ]
-                pygame.draw.polygon(self.screen, C_SPIKE, pts)
-                pygame.draw.polygon(self.screen, C_SPIKE_DARK, pts, 1)
+            self.screen.blit(art.spikes(sr.w, sr.h), sr)
 
         # Placed blocks
         for b in self.placed:
@@ -633,83 +641,71 @@ class Game:
                 self.screen.blit(s, (r.x, r.y))
 
     def _draw_hud(self):
-        # Phase indicator
-        phase_text = "● BUILD" if self.phase == "build" else "▶ PLAY"
-        phase_col  = C_PHASE_BUILD if self.phase == "build" else C_PHASE_PLAY
-        ps = self.font_sm.render(phase_text, True, phase_col)
-        self.screen.blit(ps, (20, 16))
-
-        # Level name
-        lvl_s = self.font_xs.render(self.level["name"], True, (170, 170, 180))
-        self.screen.blit(lvl_s, (20, 46))
+        # Phase indicator and level name
+        self.screen.blit(art.panel(190, 78), (10, 8))
+        phase_text = "BUILD" if self.phase == "build" else "PLAY"
+        phase_col  = art.LEAF_LIGHT if self.phase == "build" else art.GOLD_LIGHT
+        self.screen.blit(art.text(self.font_sm, phase_text, phase_col), (24, 14))
+        self.screen.blit(art.text(self.font_xs, self.level["name"]), (24, 48))
 
         # Block inventory
         if self.phase == "build":
-            panel_x = SCREEN_W - 220
-            panel_y = 16
-            kinds = list(self.hand.keys())
-            box_size = 48
-            gap = 12
+            slots = self._inventory_slots()
+            left = slots[0][1].left - 12
+            self.screen.blit(art.panel(slots[-1][1].right + 12 - left, 92), (left, 8))
 
-            for i, kind in enumerate(kinds):
+            for kind, slot in slots:
                 count = self.hand.get(kind, 0)
-                bx = panel_x + i * (box_size + gap)
-                by = panel_y
+                bx, by = slot.topleft
+                box_size = slot.w
 
                 # Highlight selected
                 sel = (kind == self.selected_kind)
-                bg_col = (60, 62, 80) if not sel else (90, 92, 120)
-                border_col = (120, 120, 140) if not sel else (200, 200, 100)
-                pygame.draw.rect(self.screen, bg_col,    (bx, by, box_size, box_size), border_radius=6)
-                pygame.draw.rect(self.screen, border_col,(bx, by, box_size, box_size), 2, border_radius=6)
+                self.screen.blit(art.slot(box_size, sel), slot)
 
-                # Mini block icon
-                cls = BLOCK_CLASSES[kind]
-                icon_w = min(cls.w, box_size - 8)
-                icon_h = min(cls.h, box_size - 8)
-                icon_r = pygame.Rect(bx + (box_size - icon_w)//2,
-                                     by + (box_size - icon_h)//2 - 4,
-                                     icon_w, icon_h)
-                col = cls.color if count > 0 else (80, 80, 80)
-                pygame.draw.rect(self.screen, col, icon_r, border_radius=3)
+                # Block icon, greyed out when none are left
+                icon = art.icon(kind, box_size - 16, count == 0)
+                self.screen.blit(icon, icon.get_rect(center=slot.center))
 
                 # Count
-                cnt_s = self.font_xs.render(str(count), True, C_HUD_TEXT)
-                self.screen.blit(cnt_s, cnt_s.get_rect(center=(bx + box_size//2, by + box_size - 8)))
+                cnt_s = art.text(self.font_xs, str(count))
+                self.screen.blit(cnt_s, cnt_s.get_rect(center=(bx + box_size - 8, by + box_size - 8)))
 
                 # Kind label
-                kl = self.font_xs.render(kind, True, (150, 150, 160))
-                self.screen.blit(kl, kl.get_rect(center=(bx + box_size//2, by + box_size + 10)))
+                kl = art.text(self.font_xs, kind)
+                self.screen.blit(kl, kl.get_rect(center=(bx + box_size//2, by + box_size + 16)))
 
             # Instruction hints
             hints = [
-                "Click to place  •  Right-click to pick up",
+                "Click an icon to choose  •  Click to place",
+                "Drag to move  •  Right-click to pick up",
                 "SPACE — start playing",
             ]
-            for j, h in enumerate(hints):
-                hs = self.font_xs.render(h, True, (120, 120, 135))
-                self.screen.blit(hs, (SCREEN_W - 320, SCREEN_H - 48 + j * 18))
+            self._draw_hints(hints)
 
         elif self.phase == "play":
-            hints = ["A/D — move   W/SPACE — jump"]
+            hints = ["A/D — move   W — jump"]
             if self._on_start_platform():
                 hints.append("SPACE — back to build")
-            for j, h in enumerate(hints):
-                hs = self.font_xs.render(h, True, (120, 120, 135))
-                self.screen.blit(hs, (SCREEN_W - 280, SCREEN_H - 48 + j * 18))
+            self._draw_hints(hints)
+
+    def _draw_hints(self, hints):
+        """Hint lines stacked in the bottom-right corner."""
+        top = SCREEN_H - 12 - len(hints) * 20
+        for j, h in enumerate(hints):
+            hs = art.text(self.font_xs, h)
+            self.screen.blit(hs, hs.get_rect(topright=(SCREEN_W - 14, top + j * 20)))
 
     def _draw_win_screen(self):
         overlay = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
         overlay.fill((10, 10, 20, 180))
         self.screen.blit(overlay, (0, 0))
 
-        title = self.font_lg.render("You Beat the Game!", True, C_WIN)
-        sub   = self.font_sm.render("Thanks for playing Pocket Planks  🎉", True, (200, 200, 200))
-        hint  = self.font_xs.render("(press SPACE to play again  — restart the game)", True, (120, 120, 135))
+        title = art.text(self.font_lg, "You Beat the Game!", art.GOLD)
+        sub   = art.text(self.font_sm, "Thanks for playing Pocket Planks")
         cy = SCREEN_H // 2
         self.screen.blit(title, title.get_rect(center=(SCREEN_W//2, cy - 40)))
         self.screen.blit(sub,   sub.get_rect(center=(SCREEN_W//2, cy + 20)))
-        self.screen.blit(hint,  hint.get_rect(center=(SCREEN_W//2, cy + 60)))
 
 
 # ─────────────────────────────────────────────
@@ -720,9 +716,9 @@ def main():
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     pygame.display.set_caption(TITLE)
 
-    font_lg = pygame.font.SysFont("Arial", 52, bold=True)
-    font_sm = pygame.font.SysFont("Arial", 26, bold=True)
-    font_xs = pygame.font.SysFont("Arial", 17)
+    font_lg = pygame.font.SysFont("arialroundedmtbold,arial", 52)
+    font_sm = pygame.font.SysFont("arialroundedmtbold,arial", 26)
+    font_xs = pygame.font.SysFont("arialroundedmtbold,arial", 17)
 
     game = Game(screen, font_lg, font_sm, font_xs)
     game.run()
