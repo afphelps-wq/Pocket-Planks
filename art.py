@@ -149,6 +149,20 @@ def background(w, h):
     return surf
 
 
+@lru_cache(maxsize=None)
+def grid_dots(w, h, spacing):
+    """Faint dot on every placement grid point."""
+    size = 5
+    c = _canvas(size, size)
+    _circle(c, WHITE + (130,), size / 2, size / 2, 1.6)
+    dot = _finish(c)
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    for x in range(0, w, spacing):
+        for y in range(0, h, spacing):
+            surf.blit(dot, (x - size // 2, y - size // 2))
+    return surf
+
+
 # ─────────────────────────────────────────────
 #  TERRAIN
 # ─────────────────────────────────────────────

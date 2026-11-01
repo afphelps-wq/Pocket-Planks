@@ -41,6 +41,9 @@ PLANK_W,  PLANK_H  = 140, 18
 BOX_W,    BOX_H    = 44,  44
 SPRING_W, SPRING_H = 44,  22
 
+# Placed blocks snap their top-left corner to this grid
+GRID = 22
+
 # Freeze frames after spike hit  (unused in Phase 1 — placeholder)
 FREEZE_FRAMES = 48
 
@@ -66,9 +69,9 @@ class Block:
         surf.blit(sprite(self.kind, self.w, self.h), self.rect)
 
     def snap_center(self, cx, cy):
-        """Move block so its center is at (cx, cy)."""
-        self.x = cx - self.w // 2
-        self.y = cy - self.h // 2
+        """Move block to the grid point that puts its center closest to (cx, cy)."""
+        self.x = (cx - self.w // 2 + GRID // 2) // GRID * GRID
+        self.y = (cy - self.h // 2 + GRID // 2) // GRID * GRID
 
     def collides_any(self, others):
         """True if this block overlaps any rect in others."""
@@ -577,6 +580,10 @@ class Game:
     # ── Drawing ───────────────────────────────────────────────────────────
     def _draw(self):
         self.screen.blit(art.background(SCREEN_W, SCREEN_H), (0, 0))
+
+        # Placement grid
+        if self.phase == "build":
+            self.screen.blit(art.grid_dots(SCREEN_W, SCREEN_H, GRID), (0, 0))
 
         # Static terrain
         for r in self.terrain:
