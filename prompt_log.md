@@ -112,10 +112,5 @@ prompt_log.md
 is this all correct
 ```
 
-## 11. Prompt log and README
 
-Sun Nov 1, 6:27 PM
-
-```text
-create the prompt lo.md and include all my prompts from this in it, also write the readme
 ```
